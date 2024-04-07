@@ -10,10 +10,10 @@
     <div class="container mt-5">
         <h1 class="mb-4">Most Anticipated Earnings for the Upcoming Week</h1>
         {% for date, rows in grouped_by_date.items() %}
-<h2>{{ date }}</h2>
+<h2>{{ date.split('-')[1] }}/{{ date.split('-')[2] }}</h2>
 <div class="row">
     {% for row in rows %}
-    <div class="col-md-4 mb-4">
+    <div class="col-md-2 mb-2">
         <div class="card">
             <div class="card-body">
                 <!-- Make the ticker clickable -->

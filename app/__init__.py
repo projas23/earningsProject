@@ -5,15 +5,18 @@ from collections import defaultdict
 from flask_caching import Cache
 import os
 import pandas as pd
-import matplotlib.pyplot as plt
+import matplotlib  # Import matplotlib before setting the backend
+matplotlib.use('Agg')  # Set the backend to 'Agg'
+import matplotlib.pyplot as plt  # Now, it's safe to import pyplot
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder='static')
 app.config['SQLALCHEMY_DATABASE_URI'] = 'mysql+mysqlconnector://root:@localhost:3307/earningsDB'
 db = SQLAlchemy(app)
 cache = Cache(app, config={'CACHE_TYPE': 'simple'})
 
+
 @app.route('/most-anticipated')
-@cache.cached(timeout=604800)  # Cache for one week
+# @cache.cached(timeout=604800)  # Cache for one week
 def most_anticipated():
     query = text('''
     SELECT 
@@ -49,28 +52,54 @@ LIMIT 40;
     
 @app.route('/stock/<ticker>')
 def stock_details(ticker):
-    # Example: Query to fetch data for the ticker
-    query = text("SELECT * FROM earnings_calendar WHERE act_symbol = :ticker")
+    query = text('''
+        SELECT 
+            date, 
+            period_end_date, 
+            consensus, 
+            recent, 
+            high, 
+            low, 
+            year_ago 
+        FROM 
+            eps_estimate 
+        WHERE 
+            act_symbol = :ticker
+        ORDER BY 
+            period_end_date;
+    ''')
+
     with db.engine.connect() as connection:
         result = connection.execute(query, {'ticker': ticker})
-        data = result.fetchall()
+        data = result.mappings().all()  # Correctly fetch data as a list of dictionaries
+
+    if not data:
+        return 'No data found for ticker: ' + ticker
     
-    # Assuming 'data' is now a DataFrame or can be converted into one
-    # df = pd.DataFrame(data)
-    
-    # Data processing and graph generation with Pandas and Matplotlib
-    # Placeholder for actual data processing and graph generation code
-    
+    # Proceed with converting data to a DataFrame and plotting
+    df = pd.DataFrame(data)
+    df['period_end_date'] = pd.to_datetime(df['period_end_date'])
+    df.set_index('period_end_date', inplace=True)
+
+    # Example plotting
+    plt.figure(figsize=(10, 6))
+    plt.plot(df.index, df['consensus'], label='Consensus EPS', marker='o')
+    plt.plot(df.index, df['recent'], label='Recent EPS', marker='x')
+    plt.title(f'EPS Estimates for {ticker}')
+    plt.xlabel('Period End Date')
+    plt.ylabel('EPS')
+    plt.legend()
+    plt.grid(True)
+        
     # Example graph save path
-    graph_path = f'static/graphs/{ticker}_details.png'
-    if not os.path.exists('static/graphs/'):
-        os.makedirs('static/graphs/')
-    
-    # Save your Matplotlib figure
-    plt.figure()
-    # Example plotting code
-    # plt.plot(df['date'], df['some_metric'])
+    graph_path = f'static/graphs/{ticker}_eps_comparison.png'
     plt.savefig(graph_path)
     plt.close()
-    
-    return render_template('stock_details.html', ticker=ticker, graph_image=graph_path)
+
+    # Ensure that graph_path is relative to the 'static' directory
+    relative_graph_path = f'graphs/{ticker}_eps_comparison.png'
+
+    # Pass the correct graph_image path to the template
+    return render_template('stock_details.html', ticker=ticker, graph_image=relative_graph_path)
+
+
