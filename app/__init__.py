@@ -5,18 +5,22 @@ from collections import defaultdict
 from flask_caching import Cache
 import os
 import pandas as pd
+import matplotlib.dates as mdates
 import matplotlib  # Import matplotlib before setting the backend
 matplotlib.use('Agg')  # Set the backend to 'Agg'
 import matplotlib.pyplot as plt  # Now, it's safe to import pyplot
+import openai
+from dotenv import load_dotenv
 
+load_dotenv()
+openai.api_key = os.getenv('OPENAI_API_KEY')
 app = Flask(__name__, static_folder='static')
 app.config['SQLALCHEMY_DATABASE_URI'] = 'mysql+mysqlconnector://root:@localhost:3307/earningsDB'
 db = SQLAlchemy(app)
 cache = Cache(app, config={'CACHE_TYPE': 'simple'})
 
-
 @app.route('/most-anticipated')
-# @cache.cached(timeout=604800)  # Cache for one week
+@cache.cached(timeout=86400)  # Cache for one day
 def most_anticipated():
     query = text('''
     SELECT 
@@ -54,13 +58,9 @@ LIMIT 40;
 def stock_details(ticker):
     query = text('''
         SELECT 
-            date, 
             period_end_date, 
-            consensus, 
-            recent, 
-            high, 
-            low, 
-            year_ago 
+            consensus AS estimated_eps, 
+            recent AS reported_eps
         FROM 
             eps_estimate 
         WHERE 
@@ -71,35 +71,71 @@ def stock_details(ticker):
 
     with db.engine.connect() as connection:
         result = connection.execute(query, {'ticker': ticker})
-        data = result.mappings().all()  # Correctly fetch data as a list of dictionaries
+        data = result.mappings().all()
 
     if not data:
         return 'No data found for ticker: ' + ticker
     
-    # Proceed with converting data to a DataFrame and plotting
+    # Convert the results into a DataFrame
     df = pd.DataFrame(data)
+
+    # Ensure that period_end_date is a datetime
     df['period_end_date'] = pd.to_datetime(df['period_end_date'])
+
+    # Convert estimated and reported EPS to numeric
+    df['estimated_eps'] = pd.to_numeric(df['estimated_eps'], errors='coerce')
+    df['reported_eps'] = pd.to_numeric(df['reported_eps'], errors='coerce')
+
+    # Drop rows with NaN values that cannot be converted to numeric
+    df = df.dropna(subset=['estimated_eps', 'reported_eps'])
+
+    # Plotting
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    # Set index to period_end_date for plotting
     df.set_index('period_end_date', inplace=True)
 
-    # Example plotting
-    plt.figure(figsize=(10, 6))
-    plt.plot(df.index, df['consensus'], label='Consensus EPS', marker='o')
-    plt.plot(df.index, df['recent'], label='Recent EPS', marker='x')
-    plt.title(f'EPS Estimates for {ticker}')
-    plt.xlabel('Period End Date')
-    plt.ylabel('EPS')
-    plt.legend()
-    plt.grid(True)
-        
-    # Example graph save path
-    graph_path = f'static/graphs/{ticker}_eps_comparison.png'
+    # Plotting the bars side-by-side
+    width = 90 # Width of the bars
+    ax.bar(df.index - pd.Timedelta(days=width/2), df['estimated_eps'], width, label='Estimated EPS', color='skyblue')
+    ax.bar(df.index + pd.Timedelta(days=width/2), df['reported_eps'], width, label='Reported EPS', color='royalblue')
+
+    # Formatting the x-axis to show the date properly
+    ax.xaxis_date()  # Interpret the x-axis values as dates
+    fig.autofmt_xdate()  # Auto-format the dates on the x-axis
+
+    # Set labels and title
+    ax.set_xlabel('Period End Date')
+    ax.set_ylabel('EPS')
+    ax.set_title(f'Earnings Per Share (EPS) for {ticker}')
+    ax.legend()
+
+    # Save the figure
+    graph_path = os.path.join(app.static_folder, 'graphs', f'{ticker}_eps_comparison.png')
+    plt.tight_layout()
     plt.savefig(graph_path)
     plt.close()
 
-    # Ensure that graph_path is relative to the 'static' directory
-    relative_graph_path = f'graphs/{ticker}_eps_comparison.png'
+    # Relative graph path for the HTML template
+    relative_graph_path = os.path.join('graphs', f'{ticker}_eps_comparison.png')
 
-    # Pass the correct graph_image path to the template
-    return render_template('stock_details.html', ticker=ticker, graph_image=relative_graph_path)
+       # Generate a prompt for the OpenAI model
+    messages = [
+        {"role": "system", "content": "You are a stock performance consultant."},
+        {"role": "user", "content": f"  Offer general advice and information rewarding the company with stock ticker {ticker}, no need for real time data. Then summarize the top 3 key points. Do not include any other text. Format the summary as a bullet point list. Do not include any other text."},
+    ]
 
+    # Make a call to the OpenAI Chat API
+    try:
+        response = openai.chat.completions.create(
+            model="gpt-4-turbo-preview",
+            messages=messages
+        )
+        summary = response.choices[0].message.content 
+    except Exception as e:  # Catch a generic exception
+        summary = "An error occurred while generating the summary."
+        print(e)
+        print(response)
+   
+    return render_template('stock_details.html', ticker=ticker, graph_image=relative_graph_path, summary=summary)
 
